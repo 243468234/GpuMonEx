@@ -49,6 +49,7 @@ void gpumonex::wx::wxGpuStatisticsPanel::Update()
     int drvtype = Drv_IOKIT;
 #endif
     driver[drvtype].GetOverallGpuLoad( 0, &stats );
+    driver[drvtype].GetOverallGpuLoad( 1, &stats );
 
     if( stats.gpu_usage != -1 )
     {

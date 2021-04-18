@@ -10,7 +10,7 @@
 
 #include <Windows.h>
 #include <iostream>
-#include <d3dkmthk.h>
+#include "d3dkmt.h"
 #include <vector>
 #include "..\debug.h"
 #include <d3d11_2.h>
@@ -18,10 +18,10 @@
 #include <comdef.h>
 #include <string.h>
 #include <wbemidl.h>
+#include <map>
 //#include <ntdef.h>
 #pragma comment(lib, "wbemuuid.lib")
 
-#include "d3dkmt2.h"
 
 #define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
 
@@ -88,7 +88,7 @@ HRESULT KmtGetAdapter( UINT Index, DXGI_ADAPTER_DESC2* Desc )
     {     
 		hr = Adapter1->QueryInterface( __uuidof( Adapter1 ), (void**) &Adapter2 );
 		Adapter2->GetDesc2( Desc );
-		printf("des:%s\n", Desc->Description);
+		wprintf(L"des:%ls\n", Desc->Description);
         ++iAdapterNum;
     }
 
@@ -220,6 +220,80 @@ BOOL KmtDetectGpu()
 	return TRUE;
 }
 
+void wchar2strstring(std::string & szDst,WCHAR * wchart)
+{
+	wchar_t * wtext = wchart;
+	DWORD dwNmu = WideCharToMultiByte(CP_OEMCP,NULL,wtext,-1,NULL,0, NULL,FALSE);
+	char * psTest;
+	psTest = new char[dwNmu];
+	WideCharToMultiByte(CP_OEMCP, NULL, wtext, -1, psTest, dwNmu, NULL, FALSE);
+	szDst = psTest;
+	delete[]psTest;
+}
+
+int GetNodeName(LUID luid, int adapterIndex, int nodeCnt, char buffer[][64]){
+	D3DKMT_OPENADAPTERFROMLUID OpenAdapterFromLUID;
+	ZeroMemory( &OpenAdapterFromLUID, sizeof( OpenAdapterFromLUID ) );
+	OpenAdapterFromLUID.AdapterLuid = luid;
+	ULONG ret = pfnD3DKMTOpenAdapterFromLuid( &OpenAdapterFromLUID );
+
+	do {
+		// version
+		int version = 0;
+		D3DKMT_QUERYADAPTERINFO info;
+		info.hAdapter = OpenAdapterFromLUID.hAdapter;
+		info.Type = KMTQAITYPE_DRIVERVERSION;
+		info.pPrivateDriverData = &version;
+		info.PrivateDriverDataSize = sizeof(version);
+		ret = pfnD3DKMTQueryAdapterInfo(&info);
+		if (ret < 0){
+			break;
+		}
+
+		for (int i = 0; i < nodeCnt; ++i){
+			D3DKMT_NODEMETADATA *node_data = new D3DKMT_NODEMETADATA;
+			memset(node_data, 0, sizeof(D3DKMT_NODEMETADATA));
+			int adapter_index = adapterIndex;
+			int ordinal_index = i;
+			node_data->NodeOrdinalAndAdapterIndex = ((adapter_index << 16) & 0xFFFF0000) + ordinal_index & 0xFFFF;
+
+			info.hAdapter = OpenAdapterFromLUID.hAdapter;
+			info.Type = KMTQAITYPE_NODEMETADATA;
+			info.pPrivateDriverData = node_data;
+			info.PrivateDriverDataSize = sizeof(D3DKMT_NODEMETADATA);
+			ret = pfnD3DKMTQueryAdapterInfo(&info);
+
+			std::string friendly_name;
+			wchar2strstring(friendly_name, node_data->NodeData.FriendlyName);
+			std::map<DXGK_ENGINE_TYPE, std::string> map_type = {
+				{DXGK_ENGINE_TYPE_3D, "3D"},
+				{DXGK_ENGINE_TYPE_VIDEO_DECODE, "Video Decode"},
+				{DXGK_ENGINE_TYPE_VIDEO_ENCODE, "Video Encode"},
+				{DXGK_ENGINE_TYPE_VIDEO_PROCESSING, "Video Processing"},
+				{DXGK_ENGINE_TYPE_SCENE_ASSEMBLY, "Scene Assembly"},
+				{DXGK_ENGINE_TYPE_COPY, "Copy"},
+				{DXGK_ENGINE_TYPE_OVERLAY, "Overlay"},
+				{DXGK_ENGINE_TYPE_OTHER, friendly_name}
+			};
+
+			std::string str_engine_name = "Unknown";
+			if (map_type.find(node_data->NodeData.EngineType) != map_type.end()){
+				if (!map_type.at(node_data->NodeData.EngineType).empty()){
+					str_engine_name = map_type.at(node_data->NodeData.EngineType);
+				}
+			}
+			memcpy(buffer[i], str_engine_name.c_str(), str_engine_name.length() + 1);
+		}
+	
+	}while(0);
+	
+	D3DKMT_CLOSEADAPTER close_adapter;
+	close_adapter.hAdapter = OpenAdapterFromLUID.hAdapter;
+	pfnD3DKMTCloseAdapter(&close_adapter);
+	return ret;
+}
+
+
 /*
  * Name: KmtGetGpuUsage
  * Desc: Returns the GPU usage in the form of a percentage.  
@@ -237,14 +311,11 @@ int  KmtGetGpuUsage( int adapter )
 	if( FAILED( KmtGetAdapter( adapter, &desc ) ) )
 		return -1;
 	
-	D3DKMT_OPENADAPTERFROMLUID OpenAdapterFromLUID;
-	ZeroMemory( &OpenAdapterFromLUID, sizeof( OpenAdapterFromLUID ) );
-	OpenAdapterFromLUID.AdapterLuid = desc.AdapterLuid;
-	ULONG ret = pfnD3DKMTOpenAdapterFromLuid( &OpenAdapterFromLUID );
-
+	char name[16][64];
+	memset(name, 0, sizeof(name));
+	GetNodeName(desc.AdapterLuid, adapter, NodeCount, name);
 
 	/* Query the statistics of each node and determine the level of running time for each one. */
-
 	for( i = 0; i < NodeCount; i++ )
 	{
 		memset( &QueryStatistics, 0, sizeof( D3DKMT_QUERYSTATISTICS ) );
@@ -259,26 +330,8 @@ int  KmtGetGpuUsage( int adapter )
 			TotalRunningTime += QueryStatistics.QueryResult.NodeInformation.GlobalInformation.RunningTime.QuadPart;
 			SystemRunningTime += QueryStatistics.QueryResult.NodeInformation.SystemInformation.RunningTime.QuadPart;
 		}
-
-		D3DKMT_NODEMETADATA *name_info = new D3DKMT_NODEMETADATA;
-		memset(name_info, 0, sizeof(D3DKMT_NODEMETADATA));
-		int adapter_index = 0;
-		int ordinal_index = i;
-		name_info->NodeOrdinalAndAdapterIndex = (adapter_index < 16 & 0xFFFF0000) + ordinal_index & 0xFFFF;
-
-		D3DKMT_QUERYADAPTERINFO info;
-		info.hAdapter = OpenAdapterFromLUID.hAdapter;
-		info.Type = KMTQAITYPE_NODEMETADATA;
-		info.pPrivateDriverData = name_info;
-		info.PrivateDriverDataSize = sizeof(D3DKMT_NODEMETADATA);
-
-		ret = pfnD3DKMTQueryAdapterInfo(&info);
-		int i  =0;
 	}
 	
-	D3DKMT_CLOSEADAPTER close_adapter;
-	close_adapter.hAdapter = OpenAdapterFromLUID.hAdapter;
-	pfnD3DKMTCloseAdapter(&close_adapter);
 	/* Update timing */
 
 	LARGE_INTEGER PerformanceCounter;
